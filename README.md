@@ -21,5 +21,4 @@ Este proyecto tiene como objetivo desarrollar un compresor de datos utilizando e
 ## Equipo de Trabajo
 - Gerardi, Santino 
 - Labayen, Franco
-- Molina, Rodrigo
-- Miño, Bruno
+
