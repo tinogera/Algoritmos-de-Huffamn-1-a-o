@@ -8,13 +8,19 @@ Inspirado en compresores como WinRAR y 7-Zip, el programa toma cualquier archivo
 
 - [Descripción](#descripción)
 - [Cómo funciona el algoritmo](#cómo-funciona-el-algoritmo)
+- [Ejemplo real de compresión](#ejemplo-real-de-compresión)
 - [Formato del archivo `.huf`](#formato-del-archivo-huf)
 - [Estructura del proyecto](#estructura-del-proyecto)
+- [Referencia de la API](#referencia-de-la-api)
 - [Requisitos](#requisitos)
 - [Compilación y ejecución](#compilación-y-ejecución)
 - [Uso de la aplicación](#uso-de-la-aplicación)
+- [Uso programático (sin la interfaz gráfica)](#uso-programático-sin-la-interfaz-gráfica)
 - [Tests](#tests)
+- [Limitaciones conocidas](#limitaciones-conocidas)
+- [Posibles mejoras futuras](#posibles-mejoras-futuras)
 - [Tecnologías utilizadas](#tecnologías-utilizadas)
+- [Cómo contribuir](#cómo-contribuir)
 - [Equipo de trabajo](#equipo-de-trabajo)
 
 ## Descripción
@@ -33,6 +39,30 @@ El proyecto implementa un compresor de datos sin pérdida (*lossless*) utilizand
 5. **Escritura del encabezado** (`escribirEncabezado`): se serializa el árbol en el archivo `.huf` (cantidad de hojas, cada byte con su código y el largo total del archivo original).
 6. **Escritura del contenido** (`escribirContenido`): se vuelve a recorrer el archivo original y, por cada byte leído, se escribe su código de Huffman bit a bit en el archivo `.huf`, usando un `BitWriter` para empaquetar los bits en bytes reales.
 7. **Descompresión** (`recomponerArbol` + `descomprimirArchivo`): se lee el encabezado para reconstruir el árbol exactamente igual a como quedó en la compresión, y luego se recorre el contenido bit a bit: en cada bit se desciende por el árbol (derecha si es `1`, izquierda si es `0`) hasta llegar a una hoja, momento en el que se escribe el byte original en el archivo de salida y se vuelve a la raíz.
+
+## Ejemplo real de compresión
+
+Para ilustrar el comportamiento del algoritmo se comprimió un texto de ejemplo de 1129 bytes con distribución de caracteres típica de un texto en español:
+
+```
+Original:   1129 bytes
+Comprimido:  743 bytes
+Ratio:      65.81 %  (≈ 34 % de reducción)
+```
+
+Un fragmento de la tabla de códigos generada para ese archivo (a mayor frecuencia, código más corto):
+
+| Carácter | Ocurrencias | Código Huffman |
+|---|---|---|
+| `' '` (espacio) | 182 | `001` |
+| `o` | 119 | `101` |
+| `e` | 99 | `0000` |
+| `s` | 79 | `0101` |
+| `z` (poco frecuente) | 1 | `0111100000` |
+
+Esto refleja la propiedad central del algoritmo: los caracteres más frecuentes (espacio, vocales) obtienen los códigos más cortos, mientras que los menos frecuentes reciben códigos más largos.
+
+> **Nota sobre archivos pequeños**: con archivos muy chicos (decenas de bytes) el archivo `.huf` puede terminar pesando *más* que el original, porque el encabezado (tabla de códigos) tiene un costo fijo que no siempre se compensa con el ahorro en el contenido. El algoritmo rinde mejor cuanto más grande es el archivo y más desigual es la distribución de frecuencias de sus bytes. Ver [Limitaciones conocidas](#limitaciones-conocidas).
 
 ## Formato del archivo `.huf`
 
@@ -82,6 +112,39 @@ El archivo comprimido `<archivo>.huf` tiene la siguiente estructura binaria:
 - **`imple`**: contiene las implementaciones concretas de esas interfaces (`CompresorImple`, `DescompresorImple`, `BitReaderImple`, `BitWriterImple`) y una `Factory` para instanciarlas.
 - **`huffman.util`**: utilidades de soporte, entre ellas `HuffmanTree` (algoritmo de recorrido del árbol) y `Console`, una consola gráfica basada en Swing que se usa como interfaz de usuario para elegir archivos e ingresar opciones.
 
+## Referencia de la API
+
+### `huffman.def.Compresor`
+
+| Método | Descripción |
+|---|---|
+| `HuffmanTable[] contarOcurrencias(String filename)` | Recorre `filename` byte a byte y devuelve un arreglo de 256 posiciones con la cantidad de veces que aparece cada valor. |
+| `List<HuffmanInfo> crearListaEnlazada(HuffmanTable[] arr)` | Convierte la tabla de ocurrencias en una lista de nodos ordenada ascendentemente por frecuencia, descartando los bytes que no aparecen. |
+| `HuffmanInfo convertirListaEnArbol(List<HuffmanInfo> lista)` | Combina iterativamente los dos nodos de menor frecuencia hasta obtener la raíz del árbol de Huffman. |
+| `void generarCodigosHuffman(HuffmanInfo root, HuffmanTable[] arr)` | Recorre el árbol y completa el código binario de cada byte en la tabla `arr`. |
+| `long escribirEncabezado(String filename, HuffmanTable[] arr)` | Crea `filename+".huf"` y escribe el encabezado (árbol serializado); devuelve el tamaño en bytes del encabezado. |
+| `void escribirContenido(String filename, HuffmanTable[] arr)` | Agrega al final de `filename+".huf"` el contenido del archivo original codificado en bits. |
+
+### `huffman.def.Descompresor`
+
+| Método | Descripción |
+|---|---|
+| `long recomponerArbol(String filename, HuffmanInfo arbol)` | Lee el encabezado de `filename+".huf"` y reconstruye el árbol de Huffman en `arbol`; devuelve la cantidad de bytes que ocupó el encabezado. |
+| `void descomprimirArchivo(HuffmanInfo root, long n, String filename)` | Salta los primeros `n` bytes (encabezado) de `filename+".huf"` y decodifica el contenido escribiendo el resultado en `filename`. |
+
+### `huffman.def.BitReader` / `huffman.def.BitWriter`
+
+| Método | Descripción |
+|---|---|
+| `using(InputStream/OutputStream)` | Asocia el lector/escritor a un stream concreto. |
+| `readBit()` / `writeBit(int bit)` | Lee o escribe un único bit (0 o 1), empaquetando/desempaquetando de a 8 en cada byte real del stream. |
+| `flush()` | Completa con ceros el byte parcial pendiente y lo vuelca al stream (o descarta el buffer de lectura al alinear con el siguiente byte). |
+
+### Modelos
+
+- **`HuffmanInfo`**: nodo del árbol de Huffman. Contiene `c` (el byte, o `300` si es un nodo interno), `n` (frecuencia acumulada) y referencias `left`/`right` a sus hijos.
+- **`HuffmanTable`**: entrada por byte (0-255) con su cantidad de ocurrencias (`n`) y su código de Huffman asignado (`cod`).
+
 ## Requisitos
 
 - **JDK 17** o superior.
@@ -120,6 +183,35 @@ Seleccione una opción:
 - **Descomprimir archivo**: abre un explorador de archivos para seleccionar un archivo `.huf` y reconstruye el archivo original (sin la extensión `.huf`).
 - **Cerrar Programa**: finaliza la aplicación.
 
+## Uso programático (sin la interfaz gráfica)
+
+Las interfaces `Compresor` y `Descompresor` pueden usarse directamente desde código Java, sin pasar por la consola gráfica de `Console`, lo cual es útil para integrarlas en otros programas o para automatizar pruebas:
+
+```java
+import imple.CompresorImple;
+import imple.DescompresorImple;
+import huffman.def.HuffmanTable;
+import huffman.def.HuffmanInfo;
+import java.util.List;
+
+// Comprimir "archivo.txt" -> genera "archivo.txt.huf"
+CompresorImple compresor = new CompresorImple();
+HuffmanTable[] ocurrencias = compresor.contarOcurrencias("archivo.txt");
+List<HuffmanInfo> lista = compresor.crearListaEnlazada(ocurrencias);
+HuffmanInfo arbol = compresor.convertirListaEnArbol(lista);
+compresor.generarCodigosHuffman(arbol, ocurrencias);
+compresor.escribirEncabezado("archivo.txt", ocurrencias);
+compresor.escribirContenido("archivo.txt", ocurrencias);
+
+// Descomprimir "archivo.txt.huf" -> reconstruye "archivo.txt"
+DescompresorImple descompresor = new DescompresorImple();
+HuffmanInfo arbolReconstruido = new HuffmanInfo();
+long bytesEncabezado = descompresor.recomponerArbol("archivo.txt", arbolReconstruido);
+descompresor.descomprimirArchivo(arbolReconstruido, bytesEncabezado, "archivo.txt");
+```
+
+> Nótese que `escribirEncabezado`/`escribirContenido` y `recomponerArbol`/`descomprimirArchivo` reciben el nombre del archivo **sin** la extensión `.huf`; ambas clases la agregan o la asumen internamente.
+
 ## Tests
 
 El proyecto usa **JUnit 5** para las pruebas automatizadas:
@@ -134,12 +226,36 @@ Ejecutar toda la suite de tests:
 mvn test
 ```
 
+## Limitaciones conocidas
+
+- **Alfabeto de un solo byte**: la frecuencia se calcula sobre valores de 0 a 255 (bytes crudos), no sobre caracteres Unicode. Un archivo de texto en UTF-8 con acentos o símbolos se comprime igual de forma correcta, pero cada byte se trata como un símbolo independiente, no como parte de un carácter multi-byte.
+- **Overhead en archivos chicos**: como el encabezado (tabla de códigos) tiene un tamaño fijo por cada byte distinto presente, en archivos muy pequeños o con muchos símbolos distintos el `.huf` puede resultar más grande que el original (ver [Ejemplo real de compresión](#ejemplo-real-de-compresión)).
+- **Sin manejo de errores de entrada**: si el archivo indicado no existe o no se puede leer, las excepciones (`IOException`) se registran con `printStackTrace()` pero no se informan al usuario de forma amigable ni interrumpen el flujo de manera controlada.
+- **Interfaz gráfica obligatoria**: `Console` está construida sobre Swing (`JFrame`), por lo que el punto de entrada interactivo (`GeneralTest`) requiere un entorno con soporte gráfico (no funciona en un servidor sin X11/framebuffer sin configuración adicional).
+- **Sin soporte de compresión de directorios**: el programa comprime un único archivo por vez; no arma un archivo empaquetado (como `.zip`) a partir de múltiples archivos o carpetas.
+- **Nombre del punto de entrada**: la clase con el `main()` de la aplicación (`GeneralTest`) vive en `src/test/java`, no en `src/main/java`, lo cual es una particularidad heredada de la organización original del proyecto.
+
+## Posibles mejoras futuras
+
+- Agregar manejo de errores con mensajes claros para el usuario (archivo inexistente, permisos, disco lleno, etc.).
+- Soportar compresión de múltiples archivos o carpetas completas.
+- Optimizar el encabezado para reducir el overhead en archivos pequeños (por ejemplo, usando un algoritmo canónico de Huffman que solo necesite las longitudes de código, no el código completo).
+- Mover el punto de entrada (`main`) a `src/main/java` y ofrecer, además de la interfaz gráfica, una interfaz de línea de comandos (CLI) para uso en scripts o entornos sin GUI.
+- Agregar más pruebas unitarias sobre la construcción del árbol y la codificación/decodificación con archivos binarios (no solo texto).
+
 ## Tecnologías utilizadas
 
 - **Java 17**
 - **Maven** (gestión de dependencias y build)
 - **JUnit 5** (`junit-jupiter`) para testing
 - **Swing** (`javax.swing`) para la interfaz de consola gráfica interactiva
+
+## Cómo contribuir
+
+1. Hacer un fork del repositorio y crear una rama descriptiva (`feature/mi-mejora` o `fix/mi-arreglo`).
+2. Ejecutar `mvn test` antes de abrir un cambio, para asegurarse de no romper la suite existente.
+3. Mantener el estilo de código existente (nombres en español para el dominio del negocio, en inglés para utilidades genéricas) y agregar tests para el código nuevo.
+4. Abrir un Pull Request describiendo el cambio y su motivación.
 
 ## Equipo de trabajo
 
